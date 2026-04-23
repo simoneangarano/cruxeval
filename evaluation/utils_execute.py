@@ -21,22 +21,21 @@ def check_correctness(check_program, timeout=3):
     :param completion_id: an optional completion ID so we can match
         the results later even if execution finishes asynchronously.
     """
-    manager = multiprocessing.Manager()
-    result = manager.list()
+    result_queue = multiprocessing.Queue()
 
-    p = multiprocessing.Process(target=unsafe_execute, args=(check_program, result, timeout))
+    p = multiprocessing.Process(target=unsafe_execute, args=(check_program, result_queue, timeout))
     p.start()
     p.join(timeout=timeout + 1)
     if p.is_alive():
         p.kill()
 
-    if not result:
-        result.append("timed out")
+    if result_queue.empty():
+        return False
 
-    return result[0] == "passed"
+    return result_queue.get() == "passed"
 
 
-def unsafe_execute(check_program, result, timeout):
+def unsafe_execute(check_program, result_queue, timeout):
 
     with create_tempdir():
 
@@ -57,11 +56,11 @@ def unsafe_execute(check_program, result, timeout):
             with swallow_io():
                 with time_limit(timeout):
                     exec(check_program, exec_globals)
-            result.append("passed")
+            result_queue.put("passed")
         except TimeoutException:
-            result.append("timed out")
+            result_queue.put("timed out")
         except BaseException as e:
-            result.append(f"failed: {e}")
+            result_queue.put(f"failed: {e}")
 
         # Needed for cleaning up.
         shutil.rmtree = rmtree

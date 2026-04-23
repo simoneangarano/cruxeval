@@ -1,11 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-import random
 import json
-from openai import OpenAI
-from concurrent.futures import ThreadPoolExecutor
 import os
 import sys
+import logging
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.append("..")
 from prompts import (
@@ -15,14 +14,14 @@ from prompts import (
     make_cot_input_prompt,
 )
 
-client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY"),
-)
+logger = logging.getLogger(__name__)
+
 
 def extract_answer_direct_output(gen):
     if "==" in gen:
         gen = gen.split("==")[1]
     return gen.strip()
+
 
 def extract_answer_direct_input(gen):
     if "==" in gen:
@@ -30,6 +29,7 @@ def extract_answer_direct_input(gen):
     if "assert f" in gen:
         gen = "f" + gen.split("assert f")[1].strip()
     return gen.strip()
+
 
 def extract_answer_cot_input(gen):
     if "[ANSWER]" in gen:
@@ -40,7 +40,8 @@ def extract_answer_cot_input(gen):
             gen = "f" + gen.split("assert f")[1].strip()
         return gen.strip()
     else:
-        return gen.split('\n')[-1].strip()
+        return gen.split("\n")[-1].strip()
+
 
 def extract_answer_cot_output(gen):
     if "[ANSWER]" in gen:
@@ -49,54 +50,76 @@ def extract_answer_cot_output(gen):
             gen = gen.split("==")[1]
         return gen.strip()
     else:
-        return gen.split('\n')[-1].strip()
+        return gen.split("\n")[-1].strip()
 
-def call_openai_api(system_prompt, prompt, temperature, n, model, max_tokens, stop) -> list[str]:
-    print("not cached")
+
+def call_openai_api(
+    client, system_prompt, prompt, n, model, stop, **generation_args
+) -> list[str]:
+    # print("not cached")
     prompt = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt}
+        {"role": "user", "content": prompt},
     ]
-    while True:
-        try:
-            result = client.chat.completions.create(
-                model=model,
-                messages=prompt,
-                temperature=temperature,
-                n=n,
-                max_tokens=max_tokens,
-                stop=stop
-            )
-            break
-        except:
-            import time; time.sleep(10); pass
+    result = client.chat.completions.create(
+        model=model,
+        messages=prompt,
+        temperature=generation_args["temperature"],
+        n=n,
+        max_tokens=generation_args["max_tokens"],
+        stop=stop,
+        top_p=generation_args["top_p"],
+        presence_penalty=generation_args["presence_penalty"],
+        extra_body=generation_args,
+    )
+    # print(f"OpenAI API response: {result}")
     return [result.choices[i].message.content for i in range(n)]
 
-def prompt_openai_general(make_prompt_fn, i, cache, gpt_query, temperature, n, model, max_tokens, stop) -> tuple[str, list[str]]:
-    x = random.randint(1, 1000)
-    print(f"started {x}")
+
+def prompt_openai_general(
+    client,
+    make_prompt_fn,
+    i,
+    cache,
+    gpt_query,
+    n,
+    model,
+    stop,
+    **generation_args,
+) -> tuple[str, list[str]]:
+    # x = random.randint(1, 1000)
+    # print(f"started {x}")
 
     full_prompt = make_prompt_fn(gpt_query)
-    if temperature == 0:
+    if generation_args["temperature"] == 0:
         cache_key = f"{full_prompt}_{model}"
     else:
-        cache_key = f"{full_prompt}_{model}_{str(temperature)}" 
+        cache_key = f"{full_prompt}_{model}_{str(generation_args['temperature'])}"
 
     if cache_key not in cache or (cache_key in cache and n > len(cache[cache_key])):
         cache_result = []
         if cache_key in cache:
             n -= len(cache[cache_key])
             cache_result = cache[cache_key]
-        system_prompt = "You are an expert at Python programming, code execution, test case generation, and fuzzing." 
-        result = call_openai_api(system_prompt, full_prompt, temperature, n=n, model=model, max_tokens=max_tokens, stop=stop)
+        system_prompt = "You are an expert at Python programming, code execution, test case generation, and fuzzing."
+        result = call_openai_api(
+            client,
+            system_prompt,
+            full_prompt,
+            n=n,
+            model=model,
+            stop=stop,
+            **generation_args,
+        )
         cache[cache_key] = cache_result + result
-        print(f"finished {x}")
+        # print(f"finished {x}")
     else:
         result = cache[cache_key]
         pass
-    return i, (cache_key, result)
+    return i, (cache_key, result)  # type: ignore
 
-def batch_prompt(fn, extraction_fn, queries, temperature, n, model, max_tokens, stop):
+
+def batch_prompt(fn, extraction_fn, client, queries, n, model, stop, **generation_args):
     # load the cache
     CACHE_DIR_PREFIX = ""
     cache_dir = os.path.join(CACHE_DIR_PREFIX, "cache.json")
@@ -104,14 +127,24 @@ def batch_prompt(fn, extraction_fn, queries, temperature, n, model, max_tokens, 
     cache_dir_bak = os.path.join(CACHE_DIR_PREFIX, "cache.json.bak")
     try:
         cache = json.load(open(cache_dir, "r"))
-    except:
+    except Exception:
         json.dump({}, open(cache_dir, "w"))
         cache = {}
 
     # run the generations
     with ThreadPoolExecutor(max_workers=50) as executor:
         futures = [
-            executor.submit(fn, i, cache, query, temperature, n, model, max_tokens, stop) 
+            executor.submit(
+                fn,
+                client,
+                i,
+                cache,
+                query,
+                n,
+                model,
+                stop,
+                **generation_args,
+            )
             for i, query in enumerate(queries)
         ]
         results_with_id = [future.result() for future in futures]
@@ -130,30 +163,116 @@ def batch_prompt(fn, extraction_fn, queries, temperature, n, model, max_tokens, 
     gens = [i[1] for i in results]
     return [[(extraction_fn(i), i) for i in r] for r in gens]
 
-# direct output prompt
-def prompt_direct_output(i, cache, gpt_query, temperature, n, model, max_tokens, stop):
-    return prompt_openai_general(make_direct_output_prompt, i, cache, gpt_query, temperature, n, model, max_tokens, stop)
 
-def batch_prompt_direct_output(queries, temperature, n, model, max_tokens, stop):
-    return batch_prompt(prompt_direct_output, extract_answer_direct_output, queries, temperature, n, model, max_tokens, stop)
+# direct output prompt
+def prompt_direct_output(
+    client, i, cache, gpt_query, n, model, stop, **generation_args
+):
+    return prompt_openai_general(
+        client,
+        make_direct_output_prompt,
+        i,
+        cache,
+        gpt_query,
+        n,
+        model,
+        stop,
+        **generation_args,
+    )
+
+
+def batch_prompt_direct_output(client, queries, n, model, stop, **generation_args):
+    return batch_prompt(
+        prompt_direct_output,
+        extract_answer_direct_output,
+        client,
+        queries,
+        n,
+        model,
+        stop,
+        **generation_args,
+    )
+
 
 # cot output prompt
-def prompt_cot_output(i, cache, gpt_query, temperature, n, model, max_tokens, stop):
-    return prompt_openai_general(make_cot_output_prompt, i, cache, gpt_query, temperature, n, model, max_tokens, stop)
+def prompt_cot_output(client, i, cache, gpt_query, n, model, stop, **generation_args):
+    return prompt_openai_general(
+        client,
+        make_cot_output_prompt,
+        i,
+        cache,
+        gpt_query,
+        n,
+        model,
+        stop,
+        **generation_args,
+    )
 
-def batch_prompt_cot_output(queries, temperature, n, model, max_tokens, stop):
-    return batch_prompt(prompt_cot_output, extract_answer_cot_output, queries, temperature, n, model, max_tokens, stop)
+
+def batch_prompt_cot_output(client, queries, n, model, stop, **generation_args):
+    return batch_prompt(
+        prompt_cot_output,
+        extract_answer_cot_output,
+        client,
+        queries,
+        n,
+        model,
+        stop,
+        **generation_args,
+    )
+
 
 # direct input prompt
-def prompt_direct_input(i, cache, gpt_query, temperature, n, model, max_tokens, stop):
-    return prompt_openai_general(make_direct_input_prompt, i, cache, gpt_query, temperature, n, model, max_tokens, stop)
+def prompt_direct_input(client, i, cache, gpt_query, n, model, stop, **generation_args):
+    return prompt_openai_general(
+        client,
+        make_direct_input_prompt,
+        i,
+        cache,
+        gpt_query,
+        n,
+        model,
+        stop,
+        **generation_args,
+    )
 
-def batch_prompt_direct_input(queries, temperature, n, model, max_tokens, stop):
-    return batch_prompt(prompt_direct_input, extract_answer_direct_input, queries, temperature, n, model, max_tokens, stop)
+
+def batch_prompt_direct_input(client, queries, n, model, stop, **generation_args):
+    return batch_prompt(
+        prompt_direct_input,
+        extract_answer_direct_input,
+        client,
+        queries,
+        n,
+        model,
+        stop,
+        **generation_args,
+    )
+
 
 # cot input prompt
-def prompt_cot_input(i, cache, gpt_query, temperature, n, model, max_tokens, stop):
-    return prompt_openai_general(make_cot_input_prompt, i, cache, gpt_query, temperature, n, model, max_tokens, stop)
+def prompt_cot_input(client, i, cache, gpt_query, n, model, stop, **generation_args):
+    return prompt_openai_general(
+        client,
+        make_cot_input_prompt,
+        i,
+        cache,
+        gpt_query,
+        n,
+        model,
+        stop,
+        **generation_args,
+    )
 
-def batch_prompt_cot_input(queries, temperature, n, model, max_tokens, stop):
-    return batch_prompt(prompt_cot_input, extract_answer_cot_input, queries, temperature, n, model, max_tokens, stop)
+
+def batch_prompt_cot_input(client, queries, n, model, stop, **generation_args):
+    return batch_prompt(
+        prompt_cot_input,
+        extract_answer_cot_input,
+        client,
+        queries,
+        n,
+        model,
+        stop,
+        **generation_args,
+    )

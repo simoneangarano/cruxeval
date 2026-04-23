@@ -8,17 +8,22 @@ from utils_general import (
     pass_at_k,
 )
 
-def evaluate_generations(generations : dict[str, list], mode):
+
+def evaluate_generations(generations: dict[str, list], mode):
     # Load the samples
-    dataset = [json.loads(l) for l in open("../data/cruxeval.jsonl", "r").readlines()]
+    dataset = [
+        json.loads(line) for line in open("../data/cruxeval.jsonl", "r").readlines()
+    ]
     references = [(doc["code"], doc["input"], doc["output"]) for doc in dataset]
 
     # Run the samples
     try:
         generations_list = [generations[f"sample_{i}"] for i in range(len(dataset))]
-    except:
-        assert False, "check format of generations, should be dictionary of lists with keys of id's in the form sample_i"
-        
+    except KeyError:
+        assert False, (
+            "check format of generations, should be dictionary of lists with keys of id's in the form sample_i"
+        )
+
     with ProcessPoolExecutor() as executor:
         args_list = zip(generations_list, references, [mode] * len(generations_list))
         results = executor.map(evaluate_score, args_list)
@@ -31,28 +36,33 @@ def evaluate_generations(generations : dict[str, list], mode):
         pass_at_1s.append(pass_at_k(n, c, 1))
         pass_at_5s.append(pass_at_k(n, c, 5))
 
-    return {"raw_generations": generations,
-            "raw_scored_generations": {f"sample_{i}": all_scores[i] for i in range(len(dataset))},
-            "pass_at_1": sum(pass_at_1s) / len(pass_at_1s) * 100,
-            "pass_at_5": sum(pass_at_5s) / len(pass_at_5s) * 100}
+    return {
+        "raw_generations": generations,
+        "raw_scored_generations": {
+            f"sample_{i}": all_scores[i] for i in range(len(dataset))
+        },
+        "pass_at_1": sum(pass_at_1s) / len(pass_at_1s) * 100,
+        "pass_at_5": sum(pass_at_5s) / len(pass_at_5s) * 100,
+    }
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--generations_path", 
+        "--generations_path",
         help="JSON path containing outputs to evaluate. Should contain a list of \
               length 800, where each element is a list of different generations \
               for that benchmark sample.",
         type=str,
     )
     parser.add_argument(
-        "--scored_results_path", 
+        "--scored_results_path",
         help="path to dump scored results",
         type=str,
         default=None,
     )
     parser.add_argument(
-        "--mode", 
+        "--mode",
         help="either input or output, depending on which one to evaluate",
         type=str,
         default=None,
@@ -62,12 +72,19 @@ if __name__ == "__main__":
     generations = json.load(open(args.generations_path, "r"))
     print(f"Scoring {args.generations_path}... expect around a minute")
 
-    if "input" in args.generations_path: args.mode = "input"
-    else: args.mode = "output"
+    if "input" in args.generations_path:
+        args.mode = "input"
+    else:
+        args.mode = "output"
 
     results = evaluate_generations(generations, args.mode)
-    print(f"Finished!")
-    print("pass@1:", round(results["pass_at_1"], 1), "pass@5:", round(results["pass_at_5"], 1))
-    if args.scored_results_path != None:
+    print("Finished!")
+    print(
+        "pass@1:",
+        round(results["pass_at_1"], 1),
+        "pass@5:",
+        round(results["pass_at_5"], 1),
+    )
+    if args.scored_results_path is not None:
         print(f"Dumping to {args.scored_results_path}")
         json.dump(results, open(args.scored_results_path, "w"))
