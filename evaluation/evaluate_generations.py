@@ -16,9 +16,14 @@ def evaluate_generations(generations: dict[str, list], mode):
     ]
     references = [(doc["code"], doc["input"], doc["output"]) for doc in dataset]
 
+    # Score only as many samples as were generated (generation may be capped via
+    # max_samples); align references to the generated subset.
+    n = len(generations)
+    references = references[:n]
+
     # Run the samples
     try:
-        generations_list = [generations[f"sample_{i}"] for i in range(len(dataset))]
+        generations_list = [generations[f"sample_{i}"] for i in range(n)]
     except KeyError:
         assert False, (
             "check format of generations, should be dictionary of lists with keys of id's in the form sample_i"
@@ -39,7 +44,7 @@ def evaluate_generations(generations: dict[str, list], mode):
     return {
         "raw_generations": generations,
         "raw_scored_generations": {
-            f"sample_{i}": all_scores[i] for i in range(len(dataset))
+            f"sample_{i}": all_scores[i] for i in range(n)
         },
         "pass_at_1": sum(pass_at_1s) / len(pass_at_1s) * 100,
         "pass_at_5": sum(pass_at_5s) / len(pass_at_5s) * 100,

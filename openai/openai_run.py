@@ -66,6 +66,11 @@ def run_openai(args):
         json.loads(line) for line in open("../data/cruxeval.jsonl", "r").readlines()
     ]
 
+    max_samples = args.generation_args.get("max_samples", -1)
+    if max_samples > 0:
+        logger.info(f"Limiting to max_samples={max_samples}")
+        dataset = dataset[:max_samples]
+
     if args.mode == "input":
         prompts = [(data["code"], data["output"]) for data in dataset]
     else:
