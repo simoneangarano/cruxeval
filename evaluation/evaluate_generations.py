@@ -18,12 +18,12 @@ def evaluate_generations(generations: dict[str, list], mode):
 
     # Score only as many samples as were generated (generation may be capped via
     # max_samples); align references to the generated subset.
-    n = len(generations)
-    references = references[:n]
+    num_problems = len(generations)
+    references = references[:num_problems]
 
     # Run the samples
     try:
-        generations_list = [generations[f"sample_{i}"] for i in range(n)]
+        generations_list = [generations[f"sample_{i}"] for i in range(num_problems)]
     except KeyError:
         assert False, (
             "check format of generations, should be dictionary of lists with keys of id's in the form sample_i"
@@ -34,17 +34,21 @@ def evaluate_generations(generations: dict[str, list], mode):
         results = executor.map(evaluate_score, args_list)
     all_scores = list(results)
 
-    # Compute pass@k scores
+    # Compute pass@k scores. `n_completions` must not be called `n`: it is
+    # per-problem (the number of generations sampled for one problem), and reusing
+    # the problem-count name here previously leaked the loop value into the
+    # raw_scored_generations comprehension below, truncating it to the number of
+    # completions (10) instead of the number of problems.
     pass_at_1s, pass_at_5s = [], []
     for execution_result in all_scores:
-        c, n = execution_result.count(True), len(execution_result)
-        pass_at_1s.append(pass_at_k(n, c, 1))
-        pass_at_5s.append(pass_at_k(n, c, 5))
+        c, n_completions = execution_result.count(True), len(execution_result)
+        pass_at_1s.append(pass_at_k(n_completions, c, 1))
+        pass_at_5s.append(pass_at_k(n_completions, c, 5))
 
     return {
         "raw_generations": generations,
         "raw_scored_generations": {
-            f"sample_{i}": all_scores[i] for i in range(n)
+            f"sample_{i}": all_scores[i] for i in range(num_problems)
         },
         "pass_at_1": sum(pass_at_1s) / len(pass_at_1s) * 100,
         "pass_at_5": sum(pass_at_5s) / len(pass_at_5s) * 100,

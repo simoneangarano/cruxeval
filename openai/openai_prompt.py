@@ -53,6 +53,55 @@ def extract_answer_cot_output(gen):
         return gen.split("\n")[-1].strip()
 
 
+# Params the caller may pass that are not inference parameters and must not be
+# forwarded to the endpoint (they come from the harness's generation config, which
+# also carries orchestration settings).
+NON_INFERENCE_ARGS = frozenset(
+    {
+        "max_samples",
+        "num_threads",
+        "reasoning",
+        "system_prompt_template",
+        "tokenizer_path",
+        "think",
+        "nothink",
+    }
+)
+
+# Sent as explicit arguments below, so they must not be repeated in extra_body.
+EXPLICIT_ARGS = frozenset({"temperature", "max_tokens", "top_p", "presence_penalty"})
+
+
+def sampling_params(generation_args: dict) -> dict:
+    """Inference params only, with the explicitly-passed ones removed.
+
+    What is left is the vLLM-specific extras (min_p, top_k, repetition_penalty,
+    chat_template_kwargs, ...) that belong in extra_body.
+    """
+    return {
+        k: v
+        for k, v in generation_args.items()
+        if k not in NON_INFERENCE_ARGS and k not in EXPLICIT_ARGS and v is not None
+    }
+
+
+def make_cache_key(full_prompt: str, model: str, generation_args: dict) -> str:
+    """Cache key covering everything that changes the generations.
+
+    The key previously covered only the prompt, model and (when non-zero)
+    temperature, so re-running the same model at the same temperature with a
+    different top_p / top_k / min_p / penalty silently replayed the old
+    generations. Every inference param is included now, and a temperature of 0 is
+    no longer a special case that drops the rest.
+    """
+    params = sampling_params(generation_args)
+    for key in ("temperature", "max_tokens", "top_p", "presence_penalty"):
+        if generation_args.get(key) is not None:
+            params[key] = generation_args[key]
+    fingerprint = json.dumps(params, sort_keys=True, default=str)
+    return f"{full_prompt}_{model}_{fingerprint}"
+
+
 def call_openai_api(
     client, system_prompt, prompt, n, model, stop, **generation_args
 ) -> list[str]:
@@ -70,7 +119,7 @@ def call_openai_api(
         stop=stop,
         top_p=generation_args["top_p"],
         presence_penalty=generation_args["presence_penalty"],
-        extra_body=generation_args,
+        extra_body=sampling_params(generation_args),
     )
     # print(f"OpenAI API response: {result}")
     return [result.choices[i].message.content for i in range(n)]
@@ -91,10 +140,7 @@ def prompt_openai_general(
     # print(f"started {x}")
 
     full_prompt = make_prompt_fn(gpt_query)
-    if generation_args["temperature"] == 0:
-        cache_key = f"{full_prompt}_{model}"
-    else:
-        cache_key = f"{full_prompt}_{model}_{str(generation_args['temperature'])}"
+    cache_key = make_cache_key(full_prompt, model, generation_args)
 
     if cache_key not in cache or (cache_key in cache and n > len(cache[cache_key])):
         cache_result = []

@@ -57,6 +57,15 @@ def parse_args():
         default="outputs/openai",
         help="Directory to save generated outputs",
     )
+    parser.add_argument(
+        "--n-samples",
+        type=int,
+        default=10,
+        help="Completions to sample per problem. pass@5 needs at least 5 AND a "
+        "non-zero temperature -- with greedy decoding every completion is "
+        "identical, so pass@5 collapses to pass@1 at n times the cost. Use 1 if "
+        "only pass@1 is wanted (default: 10).",
+    )
     args = parser.parse_args()
     return args
 
@@ -92,10 +101,23 @@ def run_openai(args):
         (False, "output"): batch_prompt_direct_output,
     }[(args.cot, args.mode)]
 
+    if args.n_samples < 5:
+        logger.warning(
+            f"n_samples={args.n_samples} < 5: pass@5 is not estimable and will be "
+            "reported as if every problem had only that many attempts."
+        )
+    if not args.generation_args.get("temperature"):
+        logger.warning(
+            "temperature is 0/unset: all %d completions per problem will be "
+            "identical, so pass@5 will equal pass@1 at %dx the cost.",
+            args.n_samples,
+            args.n_samples,
+        )
+
     outputs = fn(
         client,
         prompts,
-        n=10,
+        n=args.n_samples,
         model=args.model,
         stop=["[/ANSWER]"],
         **args.generation_args,
