@@ -85,12 +85,29 @@ def run_openai(args):
     else:
         prompts = [(data["code"], data["input"]) for data in dataset]
 
-    if args.cot:
-        logger.debug("Using chain-of-thought prompting, setting max_tokens to 1000")
-        args.generation_args["max_tokens"] = 1000
-    else:
-        logger.debug("Not using chain-of-thought prompting, setting max_tokens to 100")
-        args.generation_args["max_tokens"] = 100
+    # CoT needs room for a written-out trace before [ANSWER]; a direct answer needs
+    # almost none. These stay as fallbacks for a standalone run, but they no longer
+    # overwrite a configured budget: a thinking model spends thousands of tokens in
+    # reasoning_content before it writes any answer, so the hardcoded 1000 cut every
+    # generation off mid-thought and returned empty content for all of them.
+    default_max_tokens = 1000 if args.cot else 100
+    if not args.generation_args.get("max_tokens"):
+        args.generation_args["max_tokens"] = default_max_tokens
+    logger.info("max_tokens=%d", args.generation_args["max_tokens"])
+
+    # The stop sequence is how upstream cuts the generation at the end of the
+    # answer, but a reasoning model reasons *about the required format* and quotes
+    # "[/ANSWER]" while doing so -- generation then stops inside the trace, before
+    # any answer is written (observed: finish_reason="stop", content empty). The
+    # extraction functions cut the closing tag themselves now, so dropping the stop
+    # here costs only a few trailing tokens.
+    reasoning = bool(args.generation_args.get("reasoning"))
+    stop = None if reasoning else ["[/ANSWER]"]
+    if reasoning:
+        logger.info(
+            "reasoning=true: not passing a stop sequence (a thinking model can trip "
+            "[/ANSWER] mid-trace and never reach the answer)"
+        )
 
     client = OpenAI(base_url=args.url, api_key=os.getenv("API_KEY"))
 
@@ -119,7 +136,7 @@ def run_openai(args):
         prompts,
         n=args.n_samples,
         model=args.model,
-        stop=["[/ANSWER]"],
+        stop=stop,
         **args.generation_args,
     )
     save_dir = os.path.join(args.output_dir, "generations.json")
@@ -129,5 +146,13 @@ def run_openai(args):
 
 
 if __name__ == "__main__":
+    # Without a handler, logging's lastResort only emits WARNING and above with no
+    # context, so every logger.info here (the max_samples limit, the effective
+    # token budget, the pass@5 caveats) was silently dropped and a failure showed
+    # up as a bare traceback in the driver's log.
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(levelname)s:%(name)s:%(message)s",
+    )
     args = parse_args()
     run_openai(args)
