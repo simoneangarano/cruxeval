@@ -167,7 +167,9 @@ def _completion_text(choice, model: str) -> str:
     if content:
         return content
 
-    reasoning = getattr(choice.message, "reasoning_content", None) or ""
+    # vLLM names this field `reasoning` or `reasoning_content` depending on version.
+    reasoning = (getattr(choice.message, "reasoning", None)
+                 or getattr(choice.message, "reasoning_content", None) or "")
     with _empty_lock:
         _empty_completions[choice.finish_reason or "unknown"] += 1
         first = sum(_empty_completions.values()) == 1
