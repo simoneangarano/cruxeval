@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import json
+import os
 import argparse
 from concurrent.futures import ProcessPoolExecutor
 from utils_general import (
@@ -29,7 +30,12 @@ def evaluate_generations(generations: dict[str, list], mode):
             "check format of generations, should be dictionary of lists with keys of id's in the form sample_i"
         )
 
-    with ProcessPoolExecutor() as executor:
+    # An unbounded pool sizes itself to os.cpu_count() -- the NODE's cores, not the
+    # job's cgroup -- and each worker forks a child inside check_correctness()'s
+    # few-second budget, so correct answers time out and score as wrong. The effect
+    # is load-dependent: identical generations scored 72.74 / 51.93 / 76.11.
+    max_workers = int(os.environ.get("CRUXEVAL_SCORE_WORKERS", "8"))
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         args_list = zip(generations_list, references, [mode] * len(generations_list))
         results = executor.map(evaluate_score, args_list)
     all_scores = list(results)
@@ -81,10 +87,11 @@ if __name__ == "__main__":
     generations = json.load(open(args.generations_path, "r"))
     print(f"Scoring {args.generations_path}... expect around a minute")
 
-    if "input" in args.generations_path:
-        args.mode = "input"
-    else:
-        args.mode = "output"
+    # The flag was defined but never read; the mode was sniffed from the file path,
+    # so input-mode generations under any other path were graded as output mode
+    # (worth 21 points of pass@1). Path sniffing stays as the fallback.
+    if args.mode not in ("input", "output"):
+        args.mode = "input" if "input" in args.generations_path else "output"
 
     results = evaluate_generations(generations, args.mode)
     print("Finished!")

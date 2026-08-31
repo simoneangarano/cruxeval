@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sys
 import logging
 import threading
@@ -24,6 +25,76 @@ logger = logging.getLogger(__name__)
 # small for the model's reasoning traces.
 _empty_completions = Counter()
 _empty_lock = threading.Lock()
+
+
+def _strip_reasoning(gen) -> str:
+    """Drop the reasoning trace, which is where spurious [ANSWER] tags live.
+
+    A thinking model writes [ANSWER] repeatedly inside <think> while working out
+    the required output format -- one sampled vibethinker-3b completion contains
+    ELEVEN of them, ten of which are scratch work. Splitting on the FIRST tag
+    therefore returns a fragment of prose. Measured effect: vibethinker-3b's
+    CRUXEval-O pass@1 read 0.0872 and nanbeige4.1-3b's 0.1761, against pass@5 of
+    0.3628/0.5857 -- the implausible pass@1-to-pass@5 gap was the tell.
+
+    MUST run BEFORE _answer_body. A thinking model quotes "[/ANSWER]" inside
+    <think>; cutting at the first occurrence while the reasoning is still
+    attached truncates the response mid-reasoning, discards the real answer, and
+    leaves no "</think>" to strip. In the wrong order this measured CRUXEval-I
+    for vibethinker-3b at 12.03 instead of 79.98.
+    """
+    gen = gen or ""
+    if "</think>" in gen:
+        return gen.rsplit("</think>", 1)[1]
+    if "<think>" in gen:
+        # Unterminated: the completion hit the token cap mid-reasoning and never
+        # produced an answer. Return the tail; the extractors find nothing usable
+        # and the sample fails on its merits.
+        return gen.rsplit("<think>", 1)[1]
+    return gen
+
+
+def _last_answer_block(gen):
+    """Text after the LAST [ANSWER] tag, or None if there is none."""
+    if "[ANSWER]" not in gen:
+        return None
+    return gen.rsplit("[ANSWER]", 1)[1].strip()
+
+
+_FENCE_RE = re.compile(r"```(?:\w+)?[ \t]*\r?\n(.*?)```", re.DOTALL)
+# A bare `f(...) == value` line, for models that drop the `assert` keyword.
+_BARE_CALL_RE = re.compile(r"^f\s*\(.*\)\s*==")
+
+
+def _fenced_assert(gen):
+    """Last `assert f(...) == ...` line inside a fenced block, or None.
+
+    An SFT-heavy code model stops honouring the few-shot [ANSWER] convention and
+    answers the way it was trained to -- in a ```python fence. The tag-less
+    fallback (`gen.split("\n")[-1]`) then returns the trailing prose, or a lone
+    "```" when the fence ends the message. Such a completion is scored wrong
+    essentially always: measured pass rate for tag-less completions was
+    0.001-0.003 versus 0.72-0.79 for tagged ones, so the metric was reporting
+    format compliance, not correctness.
+
+    Magnitude on domynedge-ct64k-lr1e-4-s3000, whose [ANSWER] rate had collapsed
+    to 45.3% on CRUXEval-I and 60.5% on CRUXEval-O (baseline: 84.2%/78.3%): its
+    conditional accuracy GIVEN a tag was *higher* than the mix3 baseline's
+    (0.792 vs 0.754 on input, 0.771 vs 0.720 on output) while its reported pass@1
+    came out lower. That contradiction is the tell for this bug.
+
+    Runs only when there is no [ANSWER] tag at all, so compliant completions are
+    untouched. Scans bottom-up because the last line of a fence that also holds
+    the function definition is the assert, not the `def`.
+    """
+    for block in reversed(_FENCE_RE.findall(gen)):
+        for line in reversed(block.splitlines()):
+            line = line.strip()
+            if "==" not in line or "f(" not in line:
+                continue
+            if line.startswith("assert ") or _BARE_CALL_RE.match(line):
+                return line
+    return None
 
 
 def _answer_body(gen) -> str:
@@ -57,27 +128,29 @@ def extract_answer_direct_input(gen):
 
 
 def extract_answer_cot_input(gen):
-    gen = _answer_body(gen)
-    if "[ANSWER]" in gen:
-        gen = gen.split("[ANSWER]")[1].strip()
-        if "==" in gen:
-            gen = gen.split("==")[0]
-        if "assert f" in gen:
-            gen = "f" + gen.split("assert f")[1].strip()
-        return gen.strip()
-    else:
-        return gen.split("\n")[-1].strip()
+    gen = _answer_body(_strip_reasoning(gen))
+    block = _last_answer_block(gen)
+    if block is None:
+        block = _fenced_assert(gen)
+    if block is not None:
+        if "==" in block:
+            block = block.split("==")[0]
+        if "assert f" in block:
+            block = "f" + block.split("assert f")[1].strip()
+        return block.strip()
+    return gen.split("\n")[-1].strip()
 
 
 def extract_answer_cot_output(gen):
-    gen = _answer_body(gen)
-    if "[ANSWER]" in gen:
-        gen = gen.split("[ANSWER]")[1].strip()
-        if "==" in gen:
-            gen = gen.split("==")[1]
-        return gen.strip()
-    else:
-        return gen.split("\n")[-1].strip()
+    gen = _answer_body(_strip_reasoning(gen))
+    block = _last_answer_block(gen)
+    if block is None:
+        block = _fenced_assert(gen)
+    if block is not None:
+        if "==" in block:
+            block = block.split("==")[1]
+        return block.strip()
+    return gen.split("\n")[-1].strip()
 
 
 # Params the caller may pass that are not inference parameters and must not be
@@ -250,7 +323,10 @@ def batch_prompt(fn, extraction_fn, client, queries, n, model, stop, **generatio
         cache = {}
 
     # run the generations
-    with ThreadPoolExecutor(max_workers=50) as executor:
+    # ~500 concurrent sequences at 50 workers x n=10 overwhelms a small swarm at a
+    # 16k budget: requests queue past the client timeout and the run writes nothing.
+    max_workers = int(os.getenv("CRUXEVAL_MAX_WORKERS", "32"))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
                 fn,

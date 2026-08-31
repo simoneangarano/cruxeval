@@ -109,7 +109,14 @@ def run_openai(args):
             "[/ANSWER] mid-trace and never reach the answer)"
         )
 
-    client = OpenAI(base_url=args.url, api_key=os.getenv("API_KEY"))
+    # The 600s SDK default is not enough for a thinking model on a busy swarm: the
+    # run died on APITimeoutError with zero generations written.
+    client = OpenAI(
+        base_url=args.url,
+        api_key=os.getenv("API_KEY"),
+        timeout=float(os.getenv("CRUXEVAL_TIMEOUT", "1800")),
+        max_retries=int(os.getenv("CRUXEVAL_MAX_RETRIES", "5")),
+    )
 
     fn = {
         (True, "input"): batch_prompt_cot_input,
