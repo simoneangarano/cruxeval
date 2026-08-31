@@ -109,7 +109,18 @@ def run_openai(args):
             "[/ANSWER] mid-trace and never reach the answer)"
         )
 
-    client = OpenAI(base_url=args.url, api_key=os.getenv("API_KEY"))
+    # The SDK default read timeout is 600s, which is not enough here: a thinking
+    # model with a 16384-token budget, behind a swarm serving many concurrent
+    # requests, routinely takes longer and the whole run dies on
+    # openai.APITimeoutError with zero generations written (nanbeige4.1-3b, first
+    # pass). Retries matter for the same reason -- one slow request should not end
+    # an hour of work.
+    client = OpenAI(
+        base_url=args.url,
+        api_key=os.getenv("API_KEY"),
+        timeout=float(os.getenv("CRUXEVAL_TIMEOUT", "1800")),
+        max_retries=int(os.getenv("CRUXEVAL_MAX_RETRIES", "5")),
+    )
 
     fn = {
         (True, "input"): batch_prompt_cot_input,
