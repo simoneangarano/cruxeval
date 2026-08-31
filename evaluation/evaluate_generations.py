@@ -30,17 +30,10 @@ def evaluate_generations(generations: dict[str, list], mode):
             "check format of generations, should be dictionary of lists with keys of id's in the form sample_i"
         )
 
-    # Bound the pool. Every generation is scored by check_correctness(), which
-    # forks its OWN multiprocessing.Process and returns False if it cannot finish
-    # within timeout+1 seconds. An unbounded ProcessPoolExecutor sizes itself to
-    # os.cpu_count() -- the NODE's core count (128 on a Leonardo boost node), not
-    # this job's cgroup allocation -- so it launches ~cpu_count workers each
-    # forking a child, and process startup alone can exceed the 4s budget. The
-    # failures that follow are indistinguishable from wrong answers, and they are
-    # load-dependent, not deterministic: the same 800 domynedge-sft-37410
-    # CRUXEval-I generations scored 72.74 in the original run, 51.93 under an
-    # unbounded pool, and 76.11 scored serially. Capping is what makes the number
-    # reproducible.
+    # An unbounded pool sizes itself to os.cpu_count() -- the NODE's cores, not the
+    # job's cgroup -- and each worker forks a child inside check_correctness()'s
+    # few-second budget, so correct answers time out and score as wrong. The effect
+    # is load-dependent: identical generations scored 72.74 / 51.93 / 76.11.
     max_workers = int(os.environ.get("CRUXEVAL_SCORE_WORKERS", "8"))
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         args_list = zip(generations_list, references, [mode] * len(generations_list))
@@ -94,12 +87,9 @@ if __name__ == "__main__":
     generations = json.load(open(args.generations_path, "r"))
     print(f"Scoring {args.generations_path}... expect around a minute")
 
-    # An explicit --mode wins. The flag was defined but never read: the mode was
-    # sniffed from the substring "input" in the FILE PATH, so scoring input-mode
-    # generations from any path without that word silently graded them as output
-    # mode. It cost 21 points of pass@1 on a re-score run out of a temp directory
-    # and looked exactly like a regression in the answer extractor. Path sniffing
-    # is kept only as the fallback, for callers that pass no --mode.
+    # The flag was defined but never read; the mode was sniffed from the file path,
+    # so input-mode generations under any other path were graded as output mode
+    # (worth 21 points of pass@1). Path sniffing stays as the fallback.
     if args.mode not in ("input", "output"):
         args.mode = "input" if "input" in args.generations_path else "output"
 

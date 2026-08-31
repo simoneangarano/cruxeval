@@ -323,10 +323,8 @@ def batch_prompt(fn, extraction_fn, client, queries, n, model, stop, **generatio
         cache = {}
 
     # run the generations
-    # 50 workers x n completions is ~500 concurrent sequences at n=10, which a
-    # half-size (16-replica) swarm cannot absorb at a 16k budget -- requests queue
-    # past the client timeout and the run dies having written nothing. Overridable
-    # so concurrency can be matched to the swarm actually serving it.
+    # ~500 concurrent sequences at 50 workers x n=10 overwhelms a small swarm at a
+    # 16k budget: requests queue past the client timeout and the run writes nothing.
     max_workers = int(os.getenv("CRUXEVAL_MAX_WORKERS", "32"))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [

@@ -109,12 +109,8 @@ def run_openai(args):
             "[/ANSWER] mid-trace and never reach the answer)"
         )
 
-    # The SDK default read timeout is 600s, which is not enough here: a thinking
-    # model with a 16384-token budget, behind a swarm serving many concurrent
-    # requests, routinely takes longer and the whole run dies on
-    # openai.APITimeoutError with zero generations written (nanbeige4.1-3b, first
-    # pass). Retries matter for the same reason -- one slow request should not end
-    # an hour of work.
+    # The 600s SDK default is not enough for a thinking model on a busy swarm: the
+    # run died on APITimeoutError with zero generations written.
     client = OpenAI(
         base_url=args.url,
         api_key=os.getenv("API_KEY"),
