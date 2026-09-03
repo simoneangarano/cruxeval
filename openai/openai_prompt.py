@@ -1,20 +1,22 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-
+#!
 import json
+import logging
 import os
 import re
 import sys
-import logging
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
+# Repo-root module; on PYTHONPATH via BaseEvalDriver.env_prefix.
+import token_budget
+
 sys.path.append("..")
 from prompts import (
-    make_direct_output_prompt,
+    make_cot_input_prompt,
     make_cot_output_prompt,
     make_direct_input_prompt,
-    make_cot_input_prompt,
+    make_direct_output_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,7 +217,8 @@ def call_openai_api(
         messages=prompt,
         temperature=generation_args["temperature"],
         n=n,
-        max_tokens=generation_args["max_tokens"],
+        # Keep prompt + completion inside the context window; vLLM 400s otherwise.
+        max_tokens=token_budget.resolve_max_tokens(generation_args, messages=prompt),
         stop=stop,
         top_p=generation_args["top_p"],
         presence_penalty=generation_args["presence_penalty"],
@@ -241,8 +244,11 @@ def _completion_text(choice, model: str) -> str:
         return content
 
     # vLLM names this field `reasoning` or `reasoning_content` depending on version.
-    reasoning = (getattr(choice.message, "reasoning", None)
-                 or getattr(choice.message, "reasoning_content", None) or "")
+    reasoning = (
+        getattr(choice.message, "reasoning", None)
+        or getattr(choice.message, "reasoning_content", None)
+        or ""
+    )
     with _empty_lock:
         _empty_completions[choice.finish_reason or "unknown"] += 1
         first = sum(_empty_completions.values()) == 1
