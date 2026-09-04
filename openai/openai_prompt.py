@@ -2,13 +2,17 @@
 import json
 import logging
 import os
+import os as _os
 import re
 import sys
+import sys as _sys
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-# Repo-root module; on PYTHONPATH via BaseEvalDriver.env_prefix.
+_sys.path.append(
+    _os.environ.get("ROOT") or _os.path.abspath(__file__).split("/suites/")[0]
+)
 import token_budget
 
 sys.path.append("..")
@@ -21,37 +25,16 @@ from prompts import (
 
 logger = logging.getLogger(__name__)
 
-# Completions that came back with no answer, keyed by finish_reason. Counted from
-# the generation threads and reported once at the end of the batch -- warning per
-# occurrence would mean thousands of identical lines on a run whose budget is too
-# small for the model's reasoning traces.
 _empty_completions = Counter()
 _empty_lock = threading.Lock()
 
 
 def _strip_reasoning(gen) -> str:
-    """Drop the reasoning trace, which is where spurious [ANSWER] tags live.
-
-    A thinking model writes [ANSWER] repeatedly inside <think> while working out
-    the required output format -- one sampled vibethinker-3b completion contains
-    ELEVEN of them, ten of which are scratch work. Splitting on the FIRST tag
-    therefore returns a fragment of prose. Measured effect: vibethinker-3b's
-    CRUXEval-O pass@1 read 0.0872 and nanbeige4.1-3b's 0.1761, against pass@5 of
-    0.3628/0.5857 -- the implausible pass@1-to-pass@5 gap was the tell.
-
-    MUST run BEFORE _answer_body. A thinking model quotes "[/ANSWER]" inside
-    <think>; cutting at the first occurrence while the reasoning is still
-    attached truncates the response mid-reasoning, discards the real answer, and
-    leaves no "</think>" to strip. In the wrong order this measured CRUXEval-I
-    for vibethinker-3b at 12.03 instead of 79.98.
-    """
+    """Drop the reasoning trace, which is where spurious [ANSWER] tags live."""
     gen = gen or ""
     if "</think>" in gen:
         return gen.rsplit("</think>", 1)[1]
     if "<think>" in gen:
-        # Unterminated: the completion hit the token cap mid-reasoning and never
-        # produced an answer. Return the tail; the extractors find nothing usable
-        # and the sample fails on its merits.
         return gen.rsplit("<think>", 1)[1]
     return gen
 
@@ -69,26 +52,7 @@ _BARE_CALL_RE = re.compile(r"^f\s*\(.*\)\s*==")
 
 
 def _fenced_assert(gen):
-    """Last `assert f(...) == ...` line inside a fenced block, or None.
-
-    An SFT-heavy code model stops honouring the few-shot [ANSWER] convention and
-    answers the way it was trained to -- in a ```python fence. The tag-less
-    fallback (`gen.split("\n")[-1]`) then returns the trailing prose, or a lone
-    "```" when the fence ends the message. Such a completion is scored wrong
-    essentially always: measured pass rate for tag-less completions was
-    0.001-0.003 versus 0.72-0.79 for tagged ones, so the metric was reporting
-    format compliance, not correctness.
-
-    Magnitude on domynedge-ct64k-lr1e-4-s3000, whose [ANSWER] rate had collapsed
-    to 45.3% on CRUXEval-I and 60.5% on CRUXEval-O (baseline: 84.2%/78.3%): its
-    conditional accuracy GIVEN a tag was *higher* than the mix3 baseline's
-    (0.792 vs 0.754 on input, 0.771 vs 0.720 on output) while its reported pass@1
-    came out lower. That contradiction is the tell for this bug.
-
-    Runs only when there is no [ANSWER] tag at all, so compliant completions are
-    untouched. Scans bottom-up because the last line of a fence that also holds
-    the function definition is the assert, not the `def`.
-    """
+    """Last `assert f(...) == ...` line inside a fenced block, or None."""
     for block in reversed(_FENCE_RE.findall(gen)):
         for line in reversed(block.splitlines()):
             line = line.strip()
@@ -100,16 +64,7 @@ def _fenced_assert(gen):
 
 
 def _answer_body(gen) -> str:
-    """The generation with the closing tag (and anything after it) removed.
-
-    Upstream relied on the `[/ANSWER]` stop sequence to cut the generation
-    server-side, so the tag never reached these functions. It does now: the stop
-    sequence is dropped for reasoning models (see openai_run.py -- a thinking
-    model quoting "[/ANSWER]" mid-trace would otherwise abort the generation
-    before writing an answer), so the tag has to be cut here. Also absorbs a
-    missing completion: `message.content` can come back empty, and every one of
-    these functions used to raise TypeError on that None.
-    """
+    """The generation with the closing tag (and anything after it) removed."""
     return (gen or "").split("[/ANSWER]")[0]
 
 
@@ -155,9 +110,6 @@ def extract_answer_cot_output(gen):
     return gen.split("\n")[-1].strip()
 
 
-# Params the caller may pass that are not inference parameters and must not be
-# forwarded to the endpoint (they come from the harness's generation config, which
-# also carries orchestration settings).
 NON_INFERENCE_ARGS = frozenset(
     {
         "max_samples",
@@ -279,24 +231,13 @@ def prompt_openai_general(
     stop,
     **generation_args,
 ) -> tuple[str, list[str]]:
-    # x = random.randint(1, 1000)
-    # print(f"started {x}")
-
     full_prompt = make_prompt_fn(gpt_query)
     cache_key = make_cache_key(full_prompt, model, generation_args)
 
-    # Runs from before the empty-completion fix cached raw `None`s: the cache was
-    # written before the extraction that crashed, so an existing cache.json holds
-    # them and replaying them would resurrect the same TypeError. Treat them as
-    # never generated.
     cached = [gen for gen in cache.get(cache_key, []) if gen is not None]
 
     if len(cached) < n:
         system_prompt = "You are an expert at Python programming, code execution, test case generation, and fuzzing."
-        # Top the cache up rather than starting over, and return the cached
-        # completions alongside the new ones -- returning only the new ones (as
-        # this did) both under-reported the sample count and shrank the cache
-        # entry back down in batch_prompt's write-back.
         result = cached + call_openai_api(
             client,
             system_prompt,
@@ -307,11 +248,7 @@ def prompt_openai_general(
             **generation_args,
         )
         cache[cache_key] = result
-        # print(f"finished {x}")
     else:
-        # Exactly n, never the whole cache: pass@k is estimated from the number of
-        # completions handed back, so a cache holding more than the run asked for
-        # would silently score at a different n.
         result = cached[:n]
     return i, (cache_key, result)  # type: ignore
 
@@ -323,14 +260,13 @@ def batch_prompt(fn, extraction_fn, client, queries, n, model, stop, **generatio
     cache_dir_tmp = os.path.join(CACHE_DIR_PREFIX, "cache.json.tmp")
     cache_dir_bak = os.path.join(CACHE_DIR_PREFIX, "cache.json.bak")
     try:
-        cache = json.load(open(cache_dir, "r"))
+        with open(cache_dir, "r") as f:
+            cache = json.load(f)
     except Exception:
-        json.dump({}, open(cache_dir, "w"))
+        with open(cache_dir, "w") as f:
+            json.dump({}, f)
         cache = {}
 
-    # run the generations
-    # ~500 concurrent sequences at 50 workers x n=10 overwhelms a small swarm at a
-    # 16k budget: requests queue past the client timeout and the run writes nothing.
     max_workers = int(os.getenv("CRUXEVAL_MAX_WORKERS", "32"))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
@@ -361,11 +297,8 @@ def batch_prompt(fn, extraction_fn, client, queries, n, model, stop, **generatio
             dict(_empty_completions),
         )
 
-    # persist the cache -- the workers already wrote their generations into this
-    # same dict, so nothing to copy back in first (the write-back loop that used
-    # to live here truncated entries that held more completions than this run
-    # asked for)
-    json.dump(cache, open(cache_dir_tmp, "w"))
+    with open(cache_dir_tmp, "w") as f:
+        json.dump(cache, f)
     os.rename(cache_dir, cache_dir_bak)
     os.rename(cache_dir_tmp, cache_dir)
     os.remove(cache_dir_bak)
