@@ -2,16 +2,14 @@
 import json
 import logging
 import os
-import os as _os
 import re
 import sys
-import sys as _sys
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-_sys.path.append(
-    _os.environ.get("ROOT") or _os.path.abspath(__file__).split("/suites/")[0]
+sys.path.append(
+    os.environ.get("ROOT") or os.path.abspath(__file__).split("/suites/")[0]
 )
 import token_budget
 
@@ -262,7 +260,7 @@ def batch_prompt(fn, extraction_fn, client, queries, n, model, stop, **generatio
     try:
         with open(cache_dir, "r") as f:
             cache = json.load(f)
-    except Exception:
+    except Exception:  # noqa: BLE001
         with open(cache_dir, "w") as f:
             json.dump({}, f)
         cache = {}
