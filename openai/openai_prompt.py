@@ -11,7 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.append(
     os.environ.get("ROOT") or os.path.abspath(__file__).split("/suites/")[0]
 )
-import token_budget
+try:  # token_budget now lives in the domyn_evals package
+    from domyn_evals import token_budget
+except ImportError:  # orchestrator predating the move
+    import token_budget
 
 sys.path.append("..")
 from prompts import (
