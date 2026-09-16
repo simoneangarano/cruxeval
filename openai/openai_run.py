@@ -110,12 +110,15 @@ def run_openai(args):
         )
 
     # The 600s SDK default is not enough for a thinking model on a busy swarm: the
-    # run died on APITimeoutError with zero generations written.
+    # run died on APITimeoutError with zero generations written. Raise
+    # [generation].request_timeout for those runs rather than relying on retries --
+    # with max_retries=0 the timeout is the real per-request ceiling, where the old
+    # 1800s x 5 retries let a single stuck generation burn 2.5h.
     client = OpenAI(
         base_url=args.url,
         api_key=os.getenv("API_KEY"),
-        timeout=float(os.getenv("CRUXEVAL_TIMEOUT", "1800")),
-        max_retries=int(os.getenv("CRUXEVAL_MAX_RETRIES", "5")),
+        timeout=float(args.generation_args.get("request_timeout") or 1800),
+        max_retries=0,
     )
 
     fn = {
