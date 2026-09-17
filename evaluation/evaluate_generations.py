@@ -1,16 +1,18 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
+import argparse
 import json
 import os
-import argparse
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+
 from utils_general import (
     evaluate_score,
     pass_at_k,
 )
 
 
-def evaluate_generations(generations: dict[str, list], mode):
+def evaluate_generations(generations: dict[str, list], mode: str, k_values: list[int]):
     # Load the samples
     dataset = [
         json.loads(line) for line in open("../data/cruxeval.jsonl", "r").readlines()
@@ -45,19 +47,18 @@ def evaluate_generations(generations: dict[str, list], mode):
     # the problem-count name here previously leaked the loop value into the
     # raw_scored_generations comprehension below, truncating it to the number of
     # completions (10) instead of the number of problems.
-    pass_at_1s, pass_at_5s = [], []
+    pass_at = defaultdict(list)
     for execution_result in all_scores:
         c, n_completions = execution_result.count(True), len(execution_result)
-        pass_at_1s.append(pass_at_k(n_completions, c, 1))
-        pass_at_5s.append(pass_at_k(n_completions, c, 5))
+        for k in k_values:
+            pass_at[f"pass_at_{k}"].append(pass_at_k(n_completions, c, k))
 
     return {
         "raw_generations": generations,
         "raw_scored_generations": {
             f"sample_{i}": all_scores[i] for i in range(num_problems)
         },
-        "pass_at_1": sum(pass_at_1s) / len(pass_at_1s) * 100,
-        "pass_at_5": sum(pass_at_5s) / len(pass_at_5s) * 100,
+        **{f"pass_at_{k}": sum(pass_at[f"pass_at_{k}"]) / len(pass_at[f"pass_at_{k}"]) * 100 for k in k_values},
     }
 
 
@@ -82,6 +83,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
     )
+    parser.add_argument(
+        "--k",
+        help="k for pass@k evaluation",
+        type=int,
+        default=1,
+    )
 
     args = parser.parse_args()
     generations = json.load(open(args.generations_path, "r"))
@@ -93,14 +100,22 @@ if __name__ == "__main__":
     if args.mode not in ("input", "output"):
         args.mode = "input" if "input" in args.generations_path else "output"
 
-    results = evaluate_generations(generations, args.mode)
+    k_values = []
+    args.k = max(args.k, 1)  # Ensure k is at least 1
+    power = 1
+    while power < args.k:
+        k_values.append(power)
+        power *= 2
+    if args.k not in k_values:
+        k_values.append(args.k)
+
+    results = evaluate_generations(generations, args.mode, k_values)
     print("Finished!")
-    print(
-        "pass@1:",
-        round(results["pass_at_1"], 1),
-        "pass@5:",
-        round(results["pass_at_5"], 1),
-    )
+    for k in k_values:
+        print(
+            f"pass@{k}:",
+            round(results[f"pass_at_{k}"], 1),
+        )
     if args.scored_results_path is not None:
         print(f"Dumping to {args.scored_results_path}")
         json.dump(results, open(args.scored_results_path, "w"))
